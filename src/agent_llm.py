@@ -226,9 +226,92 @@ def run_llm_orchestrated_query(user_query: str, service: str = "payment-service"
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": json.dumps(res)[:4000]
+                "content": json.dumps(res)[:1500]  # Aggressive truncation to keep context small
             })
-            
-    final_json = {"rca": {"what_failed": f"Investigation for {service} completed (max iterations)."}}
+    
+    # === FORCE FINAL ANSWER ===
+    # LLM kept calling tools and never produced an RCA. 
+    # Make one last call WITHOUT tools to force a summary.
+    print("[Agent] Max iterations reached. Forcing final summary (no tools)...")
+    
+    # Build a summary of what we found
+    evidence_summary = []
+    for t in executed_tools:
+        status = t["result"].get("status", "unknown")
+        data = t["result"].get("mcp_data", [])
+        data_preview = str(data[0])[:200] if data else "no data"
+        evidence_summary.append(f"- {t['name']}: {status} → {data_preview}")
+    
+    summary_prompt = f"""Based on the investigation of {service}, here is what the tools found:
+
+{chr(10).join(evidence_summary[:10])}
+
+Now provide your final Root Cause Analysis as JSON (no markdown):
+{{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "...", "detail": "..."}}], "impact": "...", "immediate_fix": ["..."], "long_term_fix": ["..."]}}}}"""
+
+    messages_final = [
+        {"role": "system", "content": "You are an SRE assistant. Analyze the evidence and return a JSON RCA. No markdown."},
+        {"role": "user", "content": summary_prompt}
+    ]
+    
+    try:
+        resp = client.create_chat_completion(model=model, messages=messages_final, tools=None)
+        content = (resp.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            final_json = json.loads(content)
+        except json.JSONDecodeError:
+            final_json = _build_rca_from_evidence(service, executed_tools, content)
+    except Exception as e:
+        print(f"[Agent] Final summary call failed: {e}")
+        final_json = _build_rca_from_evidence(service, executed_tools, "")
+    
     final_json["tools"] = executed_tools
+    logger.info(f"Completed Investigation (forced). RCA: {json.dumps(final_json)[:2000]}")
     return final_json
+
+
+def _build_rca_from_evidence(service, executed_tools, raw_text):
+    """Build an RCA from the tool results when LLM can't produce JSON."""
+    evidence = []
+    errors_found = []
+    empty_results = []
+    
+    for t in executed_tools:
+        data = t["result"].get("mcp_data", [])
+        status = t["result"].get("status", "unknown")
+        
+        if status == "error":
+            errors_found.append(f"{t['name']}: {t['result'].get('error', 'unknown error')[:100]}")
+        elif data and data[0] and str(data[0]) != "[]":
+            evidence.append({"type": "tool_result", "source": t["name"], "detail": str(data[0])[:200]})
+        else:
+            empty_results.append(t["name"])
+    
+    what_failed = service
+    if not evidence and not errors_found:
+        how_failed = f"No data found for '{service}' in any datasource. This namespace/service may not exist in the cluster."
+        root_cause = [f"The namespace '{service}' does not exist in Grafana's connected Kubernetes cluster"]
+        immediate_fix = [
+            f"Verify the service name — check existing namespaces in the K8s Pods dashboard",
+            "Try querying with an existing namespace (e.g. 'default', 'monitoring', 'kube-system')"
+        ]
+    else:
+        how_failed = "; ".join(errors_found[:3]) if errors_found else "See evidence below"
+        root_cause = errors_found[:3] if errors_found else ["Investigation completed — see evidence"]
+        immediate_fix = ["Review the evidence gathered by the MCP tools above"]
+    
+    return {
+        "rca": {
+            "what_failed": what_failed,
+            "how_it_failed": how_failed,
+            "root_cause": root_cause,
+            "evidence": evidence[:5],
+            "impact": f"Investigation covered {len(executed_tools)} tool calls across Prometheus and Loki",
+            "immediate_fix": immediate_fix,
+            "long_term_fix": ["Set up alerting for this service in Grafana", "Add dashboards for service-level monitoring"]
+        },
+        "raw_response": raw_text[:1000] if raw_text else ""
+    }
+
