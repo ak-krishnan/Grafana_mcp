@@ -159,18 +159,49 @@ def run_llm_orchestrated_query(user_query: str, service: str = "payment-service"
             try:
                 final_json = json.loads(content)
             except json.JSONDecodeError:
-                final_json = {
-                    "rca": {
-                        "what_failed": service,
-                        "how_it_failed": "See analysis below",
-                        "root_cause": [content[:500] if content else "LLM did not return structured output"],
-                        "evidence": [],
-                        "impact": "See analysis",
-                        "immediate_fix": [],
-                        "long_term_fix": []
-                    },
-                    "raw_response": content
-                }
+                # Try to find JSON embedded in the text
+                import re
+                json_match = re.search(r'\{[\s\S]*"rca"[\s\S]*\}', content)
+                if json_match:
+                    try:
+                        final_json = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        final_json = None
+                else:
+                    final_json = None
+                
+                if not final_json:
+                    # Build RCA from free-text analysis
+                    lines = content.split('\n')
+                    # Try to extract fix suggestions from the text
+                    fixes_now = []
+                    fixes_long = []
+                    how_failed = []
+                    for line in lines:
+                        l = line.strip().lstrip('- •*1234567890.)')
+                        if not l:
+                            continue
+                        lower = l.lower()
+                        if any(kw in lower for kw in ['fix', 'increase', 'restart', 'scale', 'add', 'configure', 'update', 'reduce', 'limit']):
+                            if any(kw in lower for kw in ['long', 'future', 'prevent', 'permanent']):
+                                fixes_long.append(l)
+                            else:
+                                fixes_now.append(l)
+                        elif any(kw in lower for kw in ['failed', 'error', 'crash', 'timeout', 'exhaust', 'spike', 'down', 'unavailable', 'oom']):
+                            how_failed.append(l)
+
+                    final_json = {
+                        "rca": {
+                            "what_failed": service,
+                            "how_it_failed": '\n'.join(how_failed[:5]) if how_failed else content[:300],
+                            "root_cause": [content[:500] if content else "LLM did not return structured output"],
+                            "evidence": [{"type": "llm_analysis", "source": "qwen2.5:14b", "detail": "See full analysis below"}],
+                            "impact": "See analysis below",
+                            "immediate_fix": fixes_now[:5] if fixes_now else ["Review the full analysis below for recommendations"],
+                            "long_term_fix": fixes_long[:5] if fixes_long else []
+                        },
+                        "raw_response": content
+                    }
             
             final_json["tools"] = executed_tools
             logger.info(f"Completed Investigation. Final RCA: {json.dumps(final_json)[:2000]}")
