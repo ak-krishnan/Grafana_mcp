@@ -196,7 +196,7 @@
 
   <div class="input-section">
     <form method="post" action="/run" id="qf">
-      <input name="service" class="service-input" value="{{ service_name | default('payment-service') }}" placeholder="Service"/>
+      <input name="service" class="service-input" value="{{ service_name | default('monitoring') }}" placeholder="Namespace"/>
       <input name="query" class="query-input" value="{{ default_query | default('') }}" placeholder="Ask the SRE agent..." id="qi"/>
       <button type="submit" class="submit-btn" id="sb">🔍 Analyze</button>
       <div class="loading" id="ld"><div class="spinner"></div>Investigating...</div>

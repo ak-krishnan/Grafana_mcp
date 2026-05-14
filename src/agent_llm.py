@@ -34,15 +34,18 @@ DATASOURCES — use these exact UIDs:
 - Prometheus/Mimir: datasourceUid="mimir"
 - Loki logs: datasourceUid="loki"
 
+REAL CLUSTER INFO (use these in your queries):
+Top namespaces: monitoring (47 pods), kube-system (117 pods), platform (7 pods), velero (395 pods), awx (4 pods), cert-manager (3 pods), ingress-nginx (1 pod), control-plane (2 pods), default (2 pods)
+Tenant namespaces: meridian-us-2 through meridian-us-50 (1 pod each)
+Jobs: kube-state-metrics, node-exporter, cadvisor, kubelet, meridian-gateway, nc-apisix-prometheus-metrics, nc-iam-service, velero, workflow-service, prompt-gateway
+
 KEY RULES:
 - query_prometheus needs: expr (PromQL string), queryType ("instant" or "range"), datasourceUid="mimir", startTime (RFC3339)
 - For range queries also add: endTime, stepSeconds (e.g. 60)
 - query_loki_logs needs: logql, datasourceUid="loki", startRfc3339, endRfc3339
-- LogQL example: {{namespace="default"}} |= "error"
+- LogQL example: {{namespace="monitoring"}} |= "error"
 - Use timestamps near {NOW}, never 2023 dates
-- Available metrics include: kube_pod_status_phase, container_cpu_usage_seconds_total, container_memory_working_set_bytes, kube_pod_container_status_restarts_total
-
-DASHBOARDS: k8s_views_pods, k8s_views_nodes, os6Bh8Omk (cluster), rYdddlPWk (nodes), cflbv4hghxj40f (apisix)
+- Common metrics: kube_pod_status_phase, container_cpu_usage_seconds_total, container_memory_working_set_bytes, kube_pod_container_status_restarts_total, node_cpu_seconds_total, node_memory_MemAvailable_bytes
 
 After investigation, return JSON (no markdown):
 {{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "...", "detail": "..."}}], "impact": "...", "immediate_fix": ["..."], "long_term_fix": ["..."]}}}}
