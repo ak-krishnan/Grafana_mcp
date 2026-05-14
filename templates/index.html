@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Grafana SRE Agent — MCP Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    :root{--bg:#0a0e1a;--sf:#111827;--sf2:#1e293b;--bd:#1f2937;--bd2:#334155;--tx:#e2e8f0;--mt:#94a3b8;--ac:#14b8a6;--ac2:#06b6d4;--red:#ef4444;--prp:#a78bfa;--grn:#22c55e;--amb:#f59e0b;--blu:#3b82f6}
+    body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);min-height:100vh}
+    .topbar{background:rgba(17,24,39,.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--bd);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+    .topbar .logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px}
+    .topbar .logo span{background:linear-gradient(135deg,#14b8a6,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mt)}
+    .status-dot{width:8px;height:8px;border-radius:50%;animation:pulse 2s infinite}
+    .status-dot.ok{background:var(--grn);box-shadow:0 0 6px var(--grn)}
+    .status-dot.err{background:var(--red);box-shadow:0 0 6px var(--red)}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .main{display:flex;height:calc(100vh - 49px)}
+    .sidebar{width:280px;background:var(--sf);border-right:1px solid var(--bd);padding:16px;overflow-y:auto;flex-shrink:0}
+    .content{flex:1;overflow-y:auto;padding:24px;padding-bottom:100px}
+    .sidebar h3{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--mt);margin:16px 0 8px;font-weight:600}
+    .info-card{background:var(--sf2);border:1px solid var(--bd2);border-radius:8px;padding:12px;margin-bottom:10px}
+    .info-card .label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--mt);margin-bottom:4px}
+    .info-card .val{font-size:13px;color:var(--ac2);font-weight:500;word-break:break-all}
+    .dash-link{display:block;font-size:12px;padding:6px 10px;border-radius:6px;color:var(--ac2);text-decoration:none;border:1px solid transparent;margin-bottom:2px;transition:.15s}
+    .dash-link:hover{background:var(--sf2);border-color:var(--bd2)}
+    .chat-row{margin-bottom:20px;display:flex;flex-direction:column;animation:fadeIn .3s ease}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+    .bubble{padding:16px 20px;border-radius:12px;font-size:14px;line-height:1.6;margin-bottom:8px}
+    .bubble-user{align-self:flex-end;max-width:85%;background:linear-gradient(135deg,#113632,#0a2a27);color:#ccfbf1;border:1px solid #0f766e;border-bottom-right-radius:4px}
+    .bubble-user-label{font-size:10px;text-transform:uppercase;color:#5eead4;margin-bottom:6px;letter-spacing:.5px;font-weight:700}
+    .bubble-agent{align-self:flex-start;background:var(--sf);color:var(--tx);border:1px solid var(--bd);border-bottom-left-radius:4px;width:100%}
+    .bubble-agent-label{font-size:10px;text-transform:uppercase;color:var(--mt);margin-bottom:12px;letter-spacing:.5px;font-weight:700;display:flex;align-items:center;gap:8px}
+    .avatar{background:linear-gradient(135deg,var(--ac),var(--blu));width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px}
+    .tool-card{background:var(--bg);border:1px solid var(--bd);border-radius:10px;margin:12px 0;overflow:hidden}
+    .tool-card-header{background:var(--sf2);padding:10px 16px;font-size:11px;font-weight:600;color:var(--mt);text-transform:uppercase;letter-spacing:.8px;display:flex;align-items:center;gap:10px}
+    .tool-card-header .badge{background:var(--ac);color:#000;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
+    .tool-card-content{padding:14px 16px;font-family:monospace;font-size:12px;color:var(--prp)}
+    .fn{color:var(--blu);font-weight:600}
+    .tool-response{background:rgba(6,17,14,.6);border:1px solid #064e3b;border-radius:10px;margin:0 0 12px;overflow:hidden}
+    .tool-response-header{background:#022c22;padding:8px 16px;font-size:11px;font-weight:600;color:#34d399;text-transform:uppercase;letter-spacing:.8px}
+    .tool-response-content{padding:14px 16px;font-family:monospace;font-size:12px;color:var(--mt);white-space:pre-wrap;max-height:250px;overflow-y:auto}
+    .rca-section{margin-bottom:16px}
+    .rca-title{font-weight:700;display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:15px}
+    .rca-title.red{color:var(--red)}.rca-title.purple{color:var(--prp)}.rca-title.green{color:var(--grn)}.rca-title.gray{color:var(--tx)}.rca-title.amber{color:var(--amb)}.rca-title.blue{color:var(--blu)}
+    .rca-body{font-size:14px;color:var(--tx);line-height:1.6}
+    .evidence-item{background:var(--bg);padding:4px 10px;border-radius:4px;display:inline-block;margin:3px 0;border:1px solid var(--bd);color:var(--ac2);font-family:monospace;font-size:12px}
+    .fix-list{list-style:none;padding:0}.fix-list li{margin-bottom:4px;padding-left:20px;position:relative;font-size:14px}
+    .fix-list li::before{content:"→";position:absolute;left:0;color:var(--grn);font-weight:700}
+    .grafana-embed{margin:16px 0;border-radius:10px;overflow:hidden;border:1px solid var(--bd)}
+    .grafana-embed iframe{width:100%;height:400px;border:0}
+    .grafana-embed-label{background:var(--sf2);padding:8px 16px;font-size:11px;font-weight:600;color:var(--amb);text-transform:uppercase;letter-spacing:.8px}
+    .chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;margin:16px 0}
+    .chart-box{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px}
+    .chart-box h4{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--mt);margin-bottom:12px;font-weight:600}
+    .input-section{position:fixed;bottom:0;left:280px;right:0;background:rgba(10,14,26,.92);backdrop-filter:blur(12px);padding:16px 24px;border-top:1px solid var(--bd);z-index:10}
+    form{display:flex;gap:10px;align-items:center;max-width:900px;margin:0 auto}
+    input.service-input{width:140px;padding:12px 14px;background:var(--sf);border:1px solid var(--bd2);color:var(--mt);border-radius:8px;font-size:13px;outline:none}
+    input.query-input{flex:1;padding:12px 14px;background:var(--sf);border:1px solid var(--bd2);color:#fff;border-radius:8px;font-size:14px;outline:none}
+    input.query-input:focus{border-color:var(--ac)}
+    button.submit-btn{background:linear-gradient(135deg,var(--ac),var(--blu));color:#fff;border:none;padding:12px 28px;border-radius:8px;cursor:pointer;font-weight:700;font-size:14px;transition:.2s;white-space:nowrap}
+    button.submit-btn:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(20,184,166,.3)}
+    .loading{display:none;align-items:center;gap:8px;color:var(--ac);font-size:13px}
+    .spinner{width:16px;height:16px;border:2px solid var(--bd2);border-top-color:var(--ac);border-radius:50%;animation:spin .6s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .log-section{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px;margin:16px 0}
+    .log-section h4{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--amb);margin-bottom:10px}
+    .log-entry{font-family:monospace;font-size:11px;color:var(--mt);padding:4px 0;border-bottom:1px solid var(--bd)}
+    .log-entry .ts{color:var(--blu)}.log-entry .ok{color:var(--grn)}.log-entry .err{color:var(--red)}.log-entry .tool-name{color:var(--prp)}
+    @media(max-width:768px){.sidebar{display:none}.input-section{left:0}}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo">🔭 <span>Grafana SRE Agent</span></div>
+    <div class="status" id="conn-status"><div class="status-dot ok"></div>Checking...</div>
+  </div>
+  <div class="main">
+    <div class="sidebar">
+      <div class="info-card"><div class="label">Grafana Instance</div><div class="val" id="sb-grafana">—</div></div>
+      <div class="info-card"><div class="label">LLM Model</div><div class="val" id="sb-model">—</div></div>
+      <div class="info-card"><div class="label">Mode</div><div class="val" id="sb-mode">—</div></div>
+      <h3>📊 Live Dashboards</h3>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/k8s_views_pods/kubernetes-views-pods?orgId=1" target="_blank">🟢 Kubernetes / Pods</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/k8s_views_nodes/kubernetes-views-nodes?orgId=1" target="_blank">🖥️ Kubernetes / Nodes</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/os6Bh8Omk/kubernetes-cluster?orgId=1" target="_blank">☸️ Kubernetes Cluster</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/rYdddlPWk/node-exporter-full?orgId=1" target="_blank">📈 Node Exporter Full</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/cflbv4hghxj40f/apisix-api-monitoring?orgId=1" target="_blank">🌐 APISIX API Monitoring</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/px1WKJznk/container-resources?orgId=1" target="_blank">📦 Container Resources</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/bfknb88h5b0g0c/coredns?orgId=1" target="_blank">🔗 CoreDNS</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/es-app-overview/enterprise-security-application-overview?orgId=1" target="_blank">🔒 Enterprise Security App</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/es-cluster-health/enterprise-security-cluster-health?orgId=1" target="_blank">🛡️ Cluster Health</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/opencost-mixin-kover-jkwq/opencost-overview?orgId=1" target="_blank">💰 OpenCost</a>
+      <a class="dash-link" href="https://grafana.secureai-meridian.in/d/velero-backup-dashboard/velero-backup?orgId=1" target="_blank">💾 Velero Backup</a>
+      <h3>🔧 MCP Tools</h3>
+      <div id="tool-count" style="font-size:12px;color:var(--ac);padding:4px 10px">Loading...</div>
+    </div>
+
+    <div class="content" id="content">
+      <div class="chat-row">
+        <div class="bubble bubble-agent">
+          <div class="bubble-agent-label"><div class="avatar">🤖</div>SRE ASSISTANT</div>
+          Hey! I'm connected to your <strong>Grafana instance</strong> at <code>grafana.secureai-meridian.in</code> via MCP with <strong>43 tools</strong>. I can query Prometheus/Mimir metrics, Loki logs, inspect dashboards, check alerts, and run investigations. What would you like to investigate?
+        </div>
+      </div>
+
+      {% if result %}
+      <div class="chat-row">
+        <div class="bubble bubble-user"><div class="bubble-user-label">Engineer</div>{{ default_query }}</div>
+      </div>
+
+      <!-- Embedded Grafana Dashboard -->
+      <div class="grafana-embed">
+        <div class="grafana-embed-label">📊 Live Grafana Dashboard — Kubernetes / Pods</div>
+        <iframe src="https://grafana.secureai-meridian.in/d/k8s_views_pods/kubernetes-views-pods?orgId=1&kiosk&theme=dark&from=now-6h&to=now" loading="lazy"></iframe>
+      </div>
+
+      <!-- MCP Connection Log -->
+      <div class="log-section">
+        <h4>🔌 MCP ↔ LLM Connection Log</h4>
+        {% if result.tools %}
+          {% for tool in result.tools %}
+          <div class="log-entry">
+            <span class="ts">[MCP→LLM]</span> <span class="tool-name">{{ tool.name }}</span>({{ tool.args | tojson | truncate(80) }})
+            → {% if tool.result.status == 'success' %}<span class="ok">✓ SUCCESS</span>{% else %}<span class="err">✗ {{ tool.result.error | default('ERROR') | truncate(60) }}</span>{% endif %}
+          </div>
+          {% endfor %}
+          <div class="log-entry"><span class="ts">[LLM]</span> <span class="ok">✓ {{ result.tools | length }} tool calls completed → RCA generated</span></div>
+        {% else %}
+          <div class="log-entry"><span class="err">No tool calls executed</span></div>
+        {% endif %}
+      </div>
+
+      <!-- Tool Call Details -->
+      {% if result.tools %}
+        {% for tool in result.tools %}
+        <div class="tool-card">
+          <div class="tool-card-header"><span class="badge">MCP</span> <span class="fn">{{ tool.name }}</span></div>
+          <div class="tool-card-content"><span class="fn">▶ {{ tool.name }}</span>({{ tool.args | tojson | truncate(120) }})</div>
+        </div>
+        <div class="tool-response">
+          <div class="tool-response-header">✓ Response — {{ tool.result.status | default('unknown') }}</div>
+          <div class="tool-response-content">{% if tool.result.mcp_data %}{% for line in tool.result.mcp_data %}{{ line | truncate(500) }}
+{% endfor %}{% elif tool.result.log_lines %}{% for l in tool.result.log_lines %}{{ l }}
+{% endfor %}{% elif tool.result.error %}ERROR: {{ tool.result.error }}{% else %}{{ tool.result | tojson | truncate(800) }}{% endif %}</div>
+        </div>
+        {% endfor %}
+      {% endif %}
+
+      <!-- Charts -->
+      <div class="chart-grid" id="chart-grid"></div>
+
+      <!-- Final RCA -->
+      <div class="chat-row">
+        <div class="bubble bubble-agent">
+          <div class="bubble-agent-label"><div class="avatar">🤖</div>SRE ASSISTANT — Root Cause Analysis</div>
+
+          {% if result.rca.what_failed %}
+          <div class="rca-section"><div class="rca-title red">🔴 What Failed</div><div class="rca-body">{{ result.rca.what_failed }}</div></div>
+          {% endif %}
+
+          {% if result.rca.how_it_failed %}
+          <div class="rca-section"><div class="rca-title amber">⚠️ How It Failed</div><div class="rca-body">{{ result.rca.how_it_failed }}</div></div>
+          {% endif %}
+
+          {% if result.rca.root_cause %}
+          <div class="rca-section"><div class="rca-title purple">🔍 Root Cause</div><div class="rca-body">{% for c in result.rca.root_cause %}<span class="evidence-item">{{ c }}</span><br/>{% endfor %}</div></div>
+          {% endif %}
+
+          {% if result.rca.evidence %}
+          <div class="rca-section"><div class="rca-title gray">📋 Evidence</div><div class="rca-body">
+            {% for item in result.rca.evidence %}
+              {% if item.type %}<span class="evidence-item">[{{ item.type }}] {{ item.source | default('') }}: {{ item.detail | default('') }}</span><br/>
+              {% elif item.log_line %}<span class="evidence-item">{{ item.log_line }}</span><br/>
+              {% elif item.alerts %}<span class="evidence-item">{{ item.alerts | length }} alerts firing</span><br/>
+              {% else %}<span class="evidence-item">{{ item | tojson | truncate(200) }}</span><br/>{% endif %}
+            {% endfor %}
+          </div></div>
+          {% endif %}
+
+          {% if result.rca.impact %}
+          <div class="rca-section"><div class="rca-title blue">⚡ Impact</div><div class="rca-body">{{ result.rca.impact }}</div></div>
+          {% endif %}
+
+          {% if result.rca.immediate_fix or result.rca.long_term_fix %}
+          <div class="rca-section"><div class="rca-title green">✅ How To Fix</div><div class="rca-body"><ul class="fix-list">
+            {% for f in result.rca.immediate_fix %}<li><strong>Now:</strong> {{ f }}</li>{% endfor %}
+            {% for f in result.rca.long_term_fix %}<li><strong>Long-term:</strong> {{ f }}</li>{% endfor %}
+          </ul></div></div>
+          {% endif %}
+
+          {% if result.raw_response %}
+          <div class="rca-section"><div class="rca-title gray">📝 Full LLM Analysis</div><div class="rca-body" style="white-space:pre-wrap;font-size:13px">{{ result.raw_response }}</div></div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="input-section">
+    <form method="post" action="/run" id="qf">
+      <input name="service" class="service-input" value="{{ service_name | default('payment-service') }}" placeholder="Service"/>
+      <input name="query" class="query-input" value="{{ default_query | default('') }}" placeholder="Ask the SRE agent..." id="qi"/>
+      <button type="submit" class="submit-btn" id="sb">🔍 Analyze</button>
+      <div class="loading" id="ld"><div class="spinner"></div>Investigating...</div>
+    </form>
+  </div>
+
+  <script>
+    fetch('/api/status').then(r=>r.json()).then(d=>{
+      const st=document.getElementById('conn-status');
+      st.innerHTML=d.mcp_connected?'<div class="status-dot ok"></div>MCP Connected — '+d.tool_count+' tools':'<div class="status-dot err"></div>Disconnected';
+      document.getElementById('sb-grafana').textContent=d.grafana_url||'—';
+      document.getElementById('sb-model').textContent=d.model||'—';
+      document.getElementById('sb-mode').textContent=d.simulation_mode?'Simulation':'Live MCP + LLM';
+      document.getElementById('tool-count').textContent=d.tool_count+' tools available';
+    }).catch(()=>{});
+    document.getElementById('qf').addEventListener('submit',function(){document.getElementById('sb').style.display='none';document.getElementById('ld').style.display='flex';});
+    if(document.querySelector('.bubble-user'))window.scrollTo(0,document.body.scrollHeight);
+    {% if result and result.tools %}
+    (function(){var tools={{ result.tools | tojson }};var grid=document.getElementById('chart-grid');var ci=0;
+    tools.forEach(function(t){var data=t.result.parsed_data||t.result.mcp_data||[];
+    data.forEach(function(d){if(typeof d==='object'&&d!==null){Object.keys(d).forEach(function(k){var v=d[k];
+    if(Array.isArray(v)&&v.length>1&&v.some(function(p){return typeof p.value==='number'})){ci++;
+    var box=document.createElement('div');box.className='chart-box';box.innerHTML='<h4>'+t.name+' — '+k+'</h4><canvas id="c'+ci+'"></canvas>';
+    grid.appendChild(box);new Chart(document.getElementById('c'+ci),{type:'line',data:{labels:v.map(function(p){return p.timestamp||p.time||''}),datasets:[{label:k,data:v.map(function(p){return p.value||0}),borderColor:'#14b8a6',backgroundColor:'rgba(20,184,166,.1)',fill:true,tension:.3,pointRadius:3}]},options:{responsive:true,plugins:{legend:{labels:{color:'#94a3b8'}}},scales:{x:{ticks:{color:'#64748b'},grid:{color:'#1e293b'}},y:{ticks:{color:'#64748b'},grid:{color:'#1e293b'}}}}});}});}}); });})();
+    {% endif %}
+  </script>
+</body>
+</html>
