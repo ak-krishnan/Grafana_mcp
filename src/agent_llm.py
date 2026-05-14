@@ -28,69 +28,47 @@ logger = logging.getLogger("agent_audit")
 # Current time for the LLM to use
 NOW = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-SYSTEM_PROMPT = f"""You are an SRE assistant connected to a live Grafana observability stack via MCP tools.
-Current UTC time: {NOW}
+SYSTEM_PROMPT = f"""You are an SRE assistant with Grafana MCP tools. Current time: {NOW}
 
-=== GRAFANA INSTANCE INFO ===
-URL: https://grafana.secureai-meridian.in
+DATASOURCES — use these exact UIDs:
+- Prometheus/Mimir: datasourceUid="mimir"
+- Loki logs: datasourceUid="loki"
 
-DATASOURCES (use these exact UIDs):
-- Prometheus: uid="prometheus"
-- Mimir-dev (default): uid="mimir"
-- Mimir-prod: uid="mimir-prod"
-- Mimir-staging: uid="mimir-staging"
-- Loki-dev: uid="loki"
-- Loki-prod: uid="loki-prod"
-- Loki-staging: uid="loki-staging"
-- Tempo-dev: uid="tempo-dev"
-- Tempo-prod: uid="tempo-prod"
+KEY RULES:
+- query_prometheus needs: expr (PromQL string), queryType ("instant" or "range"), datasourceUid="mimir", startTime (RFC3339)
+- For range queries also add: endTime, stepSeconds (e.g. 60)
+- query_loki_logs needs: logql, datasourceUid="loki", startRfc3339, endRfc3339
+- LogQL example: {{namespace="default"}} |= "error"
+- Use timestamps near {NOW}, never 2023 dates
+- Available metrics include: kube_pod_status_phase, container_cpu_usage_seconds_total, container_memory_working_set_bytes, kube_pod_container_status_restarts_total
 
-AVAILABLE DASHBOARDS:
-- Kubernetes / Views / Pods: uid="k8s_views_pods"
-- Kubernetes / Views / Nodes: uid="k8s_views_nodes"
-- Kubernetes Cluster: uid="os6Bh8Omk"
-- K8S Pod Metrics: uid="r1m-inuIk"
-- K8S Pod Metrics Enhanced: uid="k8s-pod-enhanced"
-- Container Resources: uid="px1WKJznk"
-- Node Exporter Full: uid="rYdddlPWk"
-- APISIX API Monitoring: uid="cflbv4hghxj40f"
-- CoreDNS: uid="bfknb88h5b0g0c"
-- OpenCost: uid="opencost-mixin-kover-jkwq"
-- Enterprise Security App: uid="es-app-overview"
-- Enterprise Security Cluster: uid="es-cluster-health"
-- Velero Backup: uid="velero-backup-dashboard"
+DASHBOARDS: k8s_views_pods, k8s_views_nodes, os6Bh8Omk (cluster), rYdddlPWk (nodes), cflbv4hghxj40f (apisix)
 
-LOKI LABELS: app, component, container, instance, job, namespace, node_name, pod, service_name
-
-=== INVESTIGATION WORKFLOW ===
-1. FIRST: Use search_dashboards or list_datasources to orient yourself
-2. THEN: Use query_prometheus with datasourceUid="mimir" (default) for metrics
-3. Use query_loki_logs with datasourceUid="loki" for logs
-4. Use list_alert_rules to check alerts
-5. Use get_dashboard_by_uid to inspect specific dashboard panels
-6. Always use recent timestamps (around {NOW}), NOT old dates
-
-=== IMPORTANT RULES ===
-- ALWAYS use datasourceUid="mimir" for Prometheus queries (NOT "prom1" or empty string)
-- ALWAYS use datasourceUid="loki" for Loki queries  
-- Use real timestamps near {NOW}, NOT dates from 2023
-- For LogQL: use simple queries like {{namespace="default"}} |= "error"
-- For PromQL: use real metrics like kube_pod_status_phase, container_cpu_usage_seconds_total, etc.
-
-When you have gathered enough evidence, provide your final answer as JSON:
-{{
-  "rca": {{
-    "what_failed": "Clear description of what service/component failed",
-    "how_it_failed": "Technical explanation of the failure mechanism",
-    "root_cause": ["Root cause 1", "Root cause 2"],
-    "evidence": [{{"type": "metric/log/alert/dashboard", "source": "tool_name", "detail": "specific finding"}}],
-    "impact": "Business/user impact description",
-    "immediate_fix": ["Step 1", "Step 2"],
-    "long_term_fix": ["Improvement 1", "Improvement 2"]
-  }}
-}}
-Do not include markdown backticks. Just raw JSON.
+After investigation, return JSON (no markdown):
+{{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "...", "detail": "..."}}], "impact": "...", "immediate_fix": ["..."], "long_term_fix": ["..."]}}}}
 """
+
+# Only send the most useful tools to the LLM to reduce prompt size
+# (43 tools overwhelms a local 14B model and causes timeouts)
+PRIORITY_TOOLS = {
+    "search_dashboards",
+    "get_dashboard_by_uid",
+    "list_datasources",
+    "query_prometheus",
+    "list_prometheus_metric_names",
+    "query_loki_logs",
+    "list_alert_rules",
+    "get_alert_rules_by_dashboard_uid",
+    "list_prometheus_label_values",
+    "list_prometheus_label_names",
+}
+
+def _filter_tools(schemas):
+    """Keep only priority tools to fit within local LLM context."""
+    filtered = [s for s in schemas if s.get("function", {}).get("name") in PRIORITY_TOOLS]
+    if not filtered:
+        return schemas[:10]  # fallback: just take first 10
+    return filtered
 
 def _extract_tool_calls(msg_obj):
     """Extract tool calls from various LLM response formats."""
@@ -126,13 +104,18 @@ def run_llm_orchestrated_query(user_query: str, service: str = "payment-service"
         {"role": "user", "content": f"Service: {service}\nQuery: {user_query}\n\nPlease investigate using the available Grafana tools. Use datasourceUid='mimir' for Prometheus and datasourceUid='loki' for Loki."}
     ]
     
-    max_iterations = 6
+    max_iterations = 4
     executed_tools = []
+    
+    # Get and filter tools once (not per-iteration)
+    all_schemas = mcp_client.get_tool_schema()
+    schemas = _filter_tools(all_schemas)
+    tool_names = [s["function"]["name"] for s in schemas]
+    print(f"[Agent] Using {len(schemas)} tools: {', '.join(tool_names)}")
     
     for iteration in range(max_iterations):
         print(f"\n[Agent] === Iteration {iteration + 1}/{max_iterations} ===")
         
-        schemas = mcp_client.get_tool_schema()
         resp = client.create_chat_completion(model=model, messages=messages, tools=schemas)
         
         choices = resp.get("choices", [])
