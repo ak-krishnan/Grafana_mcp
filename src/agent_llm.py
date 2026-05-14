@@ -30,40 +30,41 @@ NOW = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"
 
 SYSTEM_PROMPT = f"""You are an SRE assistant with Grafana MCP tools. Current time: {NOW}
 
-DATASOURCES — use these exact UIDs:
+DATASOURCES — always use these exact UIDs:
 - Prometheus/Mimir: datasourceUid="mimir"
 - Loki logs: datasourceUid="loki"
 
-REAL CLUSTER INFO (use these in your queries):
-Top namespaces: monitoring (47 pods), kube-system (117 pods), platform (7 pods), velero (395 pods), awx (4 pods), cert-manager (3 pods), ingress-nginx (1 pod), control-plane (2 pods), default (2 pods)
-Tenant namespaces: meridian-us-2 through meridian-us-50 (1 pod each)
-Jobs: kube-state-metrics, node-exporter, cadvisor, kubelet, meridian-gateway, nc-apisix-prometheus-metrics, nc-iam-service, velero, workflow-service, prompt-gateway
+IMPORTANT: Always use query_prometheus for metrics. Do NOT use list_prometheus_metric_names.
 
-KEY RULES:
-- query_prometheus needs: expr (PromQL string), queryType ("instant" or "range"), datasourceUid="mimir", startTime (RFC3339)
-- For range queries also add: endTime, stepSeconds (e.g. 60)
-- query_loki_logs needs: logql, datasourceUid="loki", startRfc3339, endRfc3339
-- LogQL example: {{namespace="monitoring"}} |= "error"
-- Use timestamps near {NOW}, never 2023 dates
-- Common metrics: kube_pod_status_phase, container_cpu_usage_seconds_total, container_memory_working_set_bytes, kube_pod_container_status_restarts_total, node_cpu_seconds_total, node_memory_MemAvailable_bytes
+EXAMPLE TOOL CALLS THAT WORK:
+1. Pod restarts:
+   query_prometheus(expr="kube_pod_container_status_restarts_total{{namespace=\"monitoring\"}}", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+2. CPU usage:
+   query_prometheus(expr="rate(container_cpu_usage_seconds_total{{namespace=\"monitoring\"}}[5m])", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+3. Memory usage:
+   query_prometheus(expr="container_memory_working_set_bytes{{namespace=\"monitoring\"}}", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+4. Pod status:
+   query_prometheus(expr="kube_pod_status_phase{{namespace=\"monitoring\"}}", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+5. Error logs:
+   query_loki_logs(logql="{{namespace=\"monitoring\"}} |= \"error\"", datasourceUid="loki", startRfc3339="{NOW[:11]}00:00:00Z", endRfc3339="{NOW}")
+6. All logs:
+   query_loki_logs(logql="{{namespace=\"monitoring\"}}", datasourceUid="loki", startRfc3339="{NOW[:11]}00:00:00Z", endRfc3339="{NOW}")
 
-After investigation, return JSON (no markdown):
-{{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "...", "detail": "..."}}], "impact": "...", "immediate_fix": ["..."], "long_term_fix": ["..."]}}}}
+Replace \"monitoring\" with the user's requested namespace.
+Use timestamps near {NOW}.
+
+After gathering data, return JSON (no markdown):
+{{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "metric/log", "source": "tool_name", "detail": "specific finding"}}], "impact": "...", "immediate_fix": ["step1", "step2"], "long_term_fix": ["improvement1"]}}}}
 """
 
 # Only send the most useful tools to the LLM to reduce prompt size
 # (43 tools overwhelms a local 14B model and causes timeouts)
 PRIORITY_TOOLS = {
-    "search_dashboards",
-    "get_dashboard_by_uid",
-    "list_datasources",
     "query_prometheus",
-    "list_prometheus_metric_names",
     "query_loki_logs",
     "list_alert_rules",
-    "get_alert_rules_by_dashboard_uid",
-    "list_prometheus_label_values",
-    "list_prometheus_label_names",
+    "search_dashboards",
+    "get_dashboard_by_uid",
 }
 
 def _filter_tools(schemas):
