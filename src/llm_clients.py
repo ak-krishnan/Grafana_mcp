@@ -19,9 +19,11 @@ class OpenRouterClient(LLMClient):
         self.api_key = api_key or CONFIG.get("OPENROUTER_API_KEY")
         self.base_url = base_url or CONFIG.get("OPENROUTER_BASE_URL")
         self.simulation = CONFIG.get("SIMULATION_MODE")
+        print(f"[LLM Client] SIMULATION_MODE={self.simulation}, model will use: {'MOCK DATA' if self.simulation else 'REAL LLM'}")
 
     def create_chat_completion(self, model: str, messages: list, tools: list = None, **kwargs):
         if self.simulation:
+            print(f"[LLM] Using SIMULATION MODE (mock response)")
             return self._simulation_response(messages)
 
         # ── Real LLM call (Ollama / OpenRouter compatible) ──
@@ -49,10 +51,8 @@ class OpenRouterClient(LLMClient):
         
         payload = {"model": model, "messages": clean_messages}
         
-        if tools:
-            # Limit tool count to avoid overwhelming the model
-            payload["tools"] = tools[:20]
-            payload["tool_choice"] = "auto"
+        # IMPORTANT: Don't send tools to Qwen - it doesn't support OpenAI tools format
+        # Just let the system prompt and messages guide the analysis
         
         headers = {
             "Content-Type": "application/json",
@@ -62,6 +62,8 @@ class OpenRouterClient(LLMClient):
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         print(f"[LLM] Calling {url} with model={model}, {len(clean_messages)} messages, {len(tools or [])} tools")
+        print(f"[LLM] Full payload keys: {payload.keys()}")
+        print(f"[LLM] Payload: {json.dumps(payload, indent=2, default=str)[:500]}...")
         
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=300)
@@ -85,7 +87,12 @@ class OpenRouterClient(LLMClient):
             print("[LLM] ERROR: Request timed out after 300s")
             return {"choices": [{"message": {"content": '{"rca": {"what_failed": "LLM request timed out", "root_cause": ["Model inference took too long"]}}'}}]}
         except requests.exceptions.RequestException as e:
+            error_body = None
+            if hasattr(e.response, 'text'):
+                error_body = e.response.text[:500]
             print(f"[LLM] ERROR: Request failed: {e}")
+            if error_body:
+                print(f"[LLM] Response body: {error_body}")
             return {"choices": [{"message": {"content": f'{{"rca": {{"what_failed": "LLM request failed", "root_cause": ["{str(e)}"]}}}}'}}]}
 
     def _simulation_response(self, messages):

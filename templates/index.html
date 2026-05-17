@@ -117,7 +117,7 @@
         {% if result.tools %}
           {% for tool in result.tools %}
           <div class="log-entry">
-            <span class="ts">[MCP→LLM]</span> <span class="tool-name">{{ tool.name }}</span>({{ tool.args | tojson | truncate(80) }})
+            <span class="ts">[MCP→LLM]</span> <span class="tool-name">{{ tool.name }}</span>{% if tool.args %}({{ tool.args | tojson | truncate(80) }}){% endif %}
             → {% if tool.result.status == 'success' %}<span class="ok">✓ SUCCESS</span>{% else %}<span class="err">✗ {{ tool.result.error | default('ERROR') | truncate(60) }}</span>{% endif %}
           </div>
           {% endfor %}
@@ -132,7 +132,7 @@
         {% for tool in result.tools %}
         <div class="tool-card">
           <div class="tool-card-header"><span class="badge">MCP</span> <span class="fn">{{ tool.name }}</span></div>
-          <div class="tool-card-content"><span class="fn">▶ {{ tool.name }}</span>({{ tool.args | tojson | truncate(120) }})</div>
+          <div class="tool-card-content"><span class="fn">▶ {{ tool.name }}</span>{% if tool.args %}({{ tool.args | tojson | truncate(120) }}){% endif %}</div>
         </div>
         <div class="tool-response">
           <div class="tool-response-header">✓ Response — {{ tool.result.status | default('unknown') }}</div>

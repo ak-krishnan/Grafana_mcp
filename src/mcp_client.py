@@ -107,10 +107,14 @@ class MCPClientProxy:
             elif name == "query_prometheus_metrics": return local_tools.query_prometheus_metrics(**args)
             else: return {"error": f"unknown tool {name}"}
 
-        # Real MCP execution
-        print(f"[MCP Client] Executing {name} with {json.dumps(args)[:200]} on MCP server...")
+        # Real MCP execution - Log arguments being passed
+        print(f"[MCP Client] Executing {name}")
+        print(f"[MCP Client] Arguments type: {type(args)}")
+        print(f"[MCP Client] Arguments: {json.dumps(args) if args else 'EMPTY'}")
+        
         async def _exec():
             try:
+                print(f"[MCP Client] Calling session.call_tool({name}, arguments={args})")
                 res = await asyncio.wait_for(
                     self.session.call_tool(name, arguments=args),
                     timeout=120
