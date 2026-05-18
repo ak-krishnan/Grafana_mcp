@@ -1,22 +1,22 @@
-"""LLM-driven agent loop that supports tool-calling via MCP to a live Grafana instance.
+"""Multi-round LLM-driven agent with iterative tool orchestration via MCP.
 
-Flow:
- 1. Send system+user to LLM -> LLM returns tool call plan
- 2. Execute each requested tool via MCP
- 3. Send tool outputs back to LLM -> LLM returns final answer
+Implements proper conversation loop where tool results feed back to LLM for continued investigation.
 """
 import sys
 import os
 import json
-import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from src.mcp_client import mcp_client
 from src.llm_clients import OpenRouterClient
 from config import CONFIG
 import logging
+from datetime import datetime, timedelta
 
-# Configure audit logger
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
 logging.basicConfig(
     filename='agent_audit.log',
     level=logging.INFO,
@@ -28,69 +28,51 @@ logger = logging.getLogger("agent_audit")
 # Current time for the LLM to use
 NOW = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-SYSTEM_PROMPT = f"""You are an SRE assistant connected to a live Grafana observability stack via MCP tools.
-Current UTC time: {NOW}
+SYSTEM_PROMPT = f"""You are an SRE assistant with Grafana MCP tools. Current time: {NOW}
 
-=== GRAFANA INSTANCE INFO ===
-URL: https://grafana.secureai-meridian.in
+DATASOURCES — always use these exact UIDs:
+- Prometheus/Mimir: datasourceUid="mimir"
+- Loki logs: datasourceUid="loki"
 
-DATASOURCES (use these exact UIDs):
-- Prometheus: uid="prometheus"
-- Mimir-dev (default): uid="mimir"
-- Mimir-prod: uid="mimir-prod"
-- Mimir-staging: uid="mimir-staging"
-- Loki-dev: uid="loki"
-- Loki-prod: uid="loki-prod"
-- Loki-staging: uid="loki-staging"
-- Tempo-dev: uid="tempo-dev"
-- Tempo-prod: uid="tempo-prod"
+IMPORTANT: Always use query_prometheus for metrics. Do NOT use list_prometheus_metric_names.
 
-AVAILABLE DASHBOARDS:
-- Kubernetes / Views / Pods: uid="k8s_views_pods"
-- Kubernetes / Views / Nodes: uid="k8s_views_nodes"
-- Kubernetes Cluster: uid="os6Bh8Omk"
-- K8S Pod Metrics: uid="r1m-inuIk"
-- K8S Pod Metrics Enhanced: uid="k8s-pod-enhanced"
-- Container Resources: uid="px1WKJznk"
-- Node Exporter Full: uid="rYdddlPWk"
-- APISIX API Monitoring: uid="cflbv4hghxj40f"
-- CoreDNS: uid="bfknb88h5b0g0c"
-- OpenCost: uid="opencost-mixin-kover-jkwq"
-- Enterprise Security App: uid="es-app-overview"
-- Enterprise Security Cluster: uid="es-cluster-health"
-- Velero Backup: uid="velero-backup-dashboard"
+EXAMPLE TOOL CALLS THAT WORK:
+1. Pod restarts:
+   query_prometheus(expr="kube_pod_container_status_restarts_total{{namespace=\"monitoring\"}}", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+2. CPU usage:
+   query_prometheus(expr="rate(container_cpu_usage_seconds_total{{namespace=\"monitoring\"}}[5m])", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+3. Memory usage:
+   query_prometheus(expr="container_memory_working_set_bytes{{namespace=\"monitoring\"}}", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+4. Pod status:
+   query_prometheus(expr="kube_pod_status_phase{{namespace=\"monitoring\"}}", queryType="instant", datasourceUid="mimir", startTime="{NOW}")
+5. Error logs:
+   query_loki_logs(logql="{{namespace=\"monitoring\"}} |= \"error\"", datasourceUid="loki", startRfc3339="{NOW[:11]}00:00:00Z", endRfc3339="{NOW}")
+6. All logs:
+   query_loki_logs(logql="{{namespace=\"monitoring\"}}", datasourceUid="loki", startRfc3339="{NOW[:11]}00:00:00Z", endRfc3339="{NOW}")
 
-LOKI LABELS: app, component, container, instance, job, namespace, node_name, pod, service_name
+Replace \"monitoring\" with the user's requested namespace.
+Use timestamps near {NOW}.
 
-=== INVESTIGATION WORKFLOW ===
-1. FIRST: Use search_dashboards or list_datasources to orient yourself
-2. THEN: Use query_prometheus with datasourceUid="mimir" (default) for metrics
-3. Use query_loki_logs with datasourceUid="loki" for logs
-4. Use list_alert_rules to check alerts
-5. Use get_dashboard_by_uid to inspect specific dashboard panels
-6. Always use recent timestamps (around {NOW}), NOT old dates
-
-=== IMPORTANT RULES ===
-- ALWAYS use datasourceUid="mimir" for Prometheus queries (NOT "prom1" or empty string)
-- ALWAYS use datasourceUid="loki" for Loki queries  
-- Use real timestamps near {NOW}, NOT dates from 2023
-- For LogQL: use simple queries like {{namespace="default"}} |= "error"
-- For PromQL: use real metrics like kube_pod_status_phase, container_cpu_usage_seconds_total, etc.
-
-When you have gathered enough evidence, provide your final answer as JSON:
-{{
-  "rca": {{
-    "what_failed": "Clear description of what service/component failed",
-    "how_it_failed": "Technical explanation of the failure mechanism",
-    "root_cause": ["Root cause 1", "Root cause 2"],
-    "evidence": [{{"type": "metric/log/alert/dashboard", "source": "tool_name", "detail": "specific finding"}}],
-    "impact": "Business/user impact description",
-    "immediate_fix": ["Step 1", "Step 2"],
-    "long_term_fix": ["Improvement 1", "Improvement 2"]
-  }}
-}}
-Do not include markdown backticks. Just raw JSON.
+After gathering data, return JSON (no markdown):
+{{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "metric/log", "source": "tool_name", "detail": "specific finding"}}], "impact": "...", "immediate_fix": ["step1", "step2"], "long_term_fix": ["improvement1"]}}}}
 """
+
+# Only send the most useful tools to the LLM to reduce prompt size
+# (43 tools overwhelms a local 14B model and causes timeouts)
+PRIORITY_TOOLS = {
+    "query_prometheus",
+    "query_loki_logs",
+    "list_alert_rules",
+    "search_dashboards",
+    "get_dashboard_by_uid",
+}
+
+def _filter_tools(schemas):
+    """Keep only priority tools to fit within local LLM context."""
+    filtered = [s for s in schemas if s.get("function", {}).get("name") in PRIORITY_TOOLS]
+    if not filtered:
+        return schemas[:10]  # fallback: just take first 10
+    return filtered
 
 def _extract_tool_calls(msg_obj):
     """Extract tool calls from various LLM response formats."""
@@ -116,23 +98,33 @@ def _extract_tool_calls(msg_obj):
 
 
 def run_llm_orchestrated_query(user_query: str, service: str = "payment-service", model: str = None):
-    logger.info(f"--- NEW INVESTIGATION STARTED: {service} ---")
+    """Multi-round LLM-driven tool orchestration with iterative investigation"""
+    logger.info(f"=== Investigation START: {service} ===")
     logger.info(f"Query: {user_query}")
+    print(f"\n[Agent] Query: {user_query}")
+    print(f"[Agent] Service: {service}")
     
     client = OpenRouterClient()
     model = model or CONFIG.get("OPENROUTER_MODEL")
+    
+    # Initialize conversation
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Service: {service}\nQuery: {user_query}\n\nPlease investigate using the available Grafana tools. Use datasourceUid='mimir' for Prometheus and datasourceUid='loki' for Loki."}
+        {"role": "user", "content": f"Investigate: {service}\nCluster: {cluster}\nQuery: {user_query}"}
     ]
     
-    max_iterations = 6
+    max_iterations = 4
     executed_tools = []
+    
+    # Get and filter tools once (not per-iteration)
+    all_schemas = mcp_client.get_tool_schema()
+    schemas = _filter_tools(all_schemas)
+    tool_names = [s["function"]["name"] for s in schemas]
+    print(f"[Agent] Using {len(schemas)} tools: {', '.join(tool_names)}")
     
     for iteration in range(max_iterations):
         print(f"\n[Agent] === Iteration {iteration + 1}/{max_iterations} ===")
         
-        schemas = mcp_client.get_tool_schema()
         resp = client.create_chat_completion(model=model, messages=messages, tools=schemas)
         
         choices = resp.get("choices", [])
@@ -144,108 +136,152 @@ def run_llm_orchestrated_query(user_query: str, service: str = "payment-service"
         tool_calls = _extract_tool_calls(msg_obj)
         
         if not tool_calls:
-            content = (msg_obj.get("content") or "{}").strip()
-            print(f"[Agent] Final answer received ({len(content)} chars)")
+            print(f"[Agent] No tool calls found in LLM response")
+            # Return partial RCA from what we've gathered
+            return _build_rca_from_evidence(service, executed_tools, "")
+        
+        print(f"[Agent] Tools to call: {[tc.get('name') for tc in tool_calls]}")
+        
+        # Execute tools
+        round_results = []
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name")
+            tool_args = tool_call.get("args", {})
             
-            # Strip markdown code fences
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
+            print(f"[Agent] → {tool_name}...")
+            
+            # Skip certain tools
+            if tool_name == "list_prometheus_metric_names":
+                round_results.append({
+                    "name": tool_name,
+                    "status": "skipped",
+                    "error": "Disabled tool"
+                })
+                continue
             
             try:
-                final_json = json.loads(content)
-            except json.JSONDecodeError:
-                # Try to find JSON embedded in the text
-                import re
-                json_match = re.search(r'\{[\s\S]*"rca"[\s\S]*\}', content)
-                if json_match:
-                    try:
-                        final_json = json.loads(json_match.group())
-                    except json.JSONDecodeError:
-                        final_json = None
-                else:
-                    final_json = None
+                result = mcp_client.execute_tool(tool_name, tool_args)
+                status = result.get("status", "error")
+                print(f"[Agent]   ✓ {status}")
                 
-                if not final_json:
-                    # Build RCA from free-text analysis
-                    lines = content.split('\n')
-                    # Try to extract fix suggestions from the text
-                    fixes_now = []
-                    fixes_long = []
-                    how_failed = []
-                    for line in lines:
-                        l = line.strip().lstrip('- •*1234567890.)')
-                        if not l:
-                            continue
-                        lower = l.lower()
-                        if any(kw in lower for kw in ['fix', 'increase', 'restart', 'scale', 'add', 'configure', 'update', 'reduce', 'limit']):
-                            if any(kw in lower for kw in ['long', 'future', 'prevent', 'permanent']):
-                                fixes_long.append(l)
-                            else:
-                                fixes_now.append(l)
-                        elif any(kw in lower for kw in ['failed', 'error', 'crash', 'timeout', 'exhaust', 'spike', 'down', 'unavailable', 'oom']):
-                            how_failed.append(l)
-
-                    final_json = {
-                        "rca": {
-                            "what_failed": service,
-                            "how_it_failed": '\n'.join(how_failed[:5]) if how_failed else content[:300],
-                            "root_cause": [content[:500] if content else "LLM did not return structured output"],
-                            "evidence": [{"type": "llm_analysis", "source": "qwen2.5:14b", "detail": "See full analysis below"}],
-                            "impact": "See analysis below",
-                            "immediate_fix": fixes_now[:5] if fixes_now else ["Review the full analysis below for recommendations"],
-                            "long_term_fix": fixes_long[:5] if fixes_long else []
-                        },
-                        "raw_response": content
-                    }
-            
-            final_json["tools"] = executed_tools
-            logger.info(f"Completed Investigation. Final RCA: {json.dumps(final_json)[:2000]}")
-            return final_json
-        
-        # Build assistant message
-        assistant_msg = {"role": "assistant", "content": msg_obj.get("content") or ""}
-        if tool_calls:
-            assistant_msg["tool_calls"] = tool_calls
-        messages.append(assistant_msg)
-        
-        for tc in tool_calls:
-            fname = tc.get("function", {}).get("name", "")
-            raw_args = tc.get("function", {}).get("arguments", "{}")
-            call_id = tc.get("id", f"call_{len(executed_tools)}")
-            
-            try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except json.JSONDecodeError:
-                args = {}
-            
-            logger.info(f"Executing Tool: {fname} with args: {json.dumps(args)}")
-            print(f"[Agent] Calling tool: {fname}({json.dumps(args)[:150]})")
-            
-            try:
-                res = mcp_client.execute_tool(fname, args)
+                round_results.append({
+                    "name": tool_name,
+                    "args": tool_args,
+                    "status": status,
+                    "data": result.get("mcp_data", []) if status == "success" else None,
+                    "error": result.get("error") if status != "success" else None
+                })
+                
+                executed_tools.append({
+                    "name": tool_name,
+                    "args": tool_args,
+                    "result": result
+                })
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", f"call_{len(executed_tools)}"),
+                    "content": json.dumps(result)[:1500]
+                })
             except Exception as e:
                 res = {"status": "error", "error": str(e)}
                 print(f"[Agent] Tool error: {e}")
-            
-            logger.info(f"Tool Result ({fname}): {json.dumps(res)[:1000]}")
-            
-            executed_tools.append({
-                "name": fname,
-                "args": args,
-                "result": res
-            })
-            
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": json.dumps(res)[:4000]
-            })
-            
-    final_json = {"rca": {"what_failed": f"Investigation for {service} completed (max iterations)."}}
+                
+                executed_tools.append({
+                    "name": tool_name,
+                    "args": tool_args,
+                    "result": res
+                })
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", f"call_{len(executed_tools)}"),
+                    "content": json.dumps(res)[:1500]
+                })
+    
+    # === FORCE FINAL ANSWER ===
+    # LLM kept calling tools and never produced an RCA. 
+    # Make one last call WITHOUT tools to force a summary.
+    print("[Agent] Max iterations reached. Forcing final summary (no tools)...")
+    
+    # Build a summary of what we found
+    evidence_summary = []
+    for t in executed_tools:
+        status = t["result"].get("status", "unknown")
+        data = t["result"].get("mcp_data", [])
+        data_preview = str(data[0])[:200] if data else "no data"
+        evidence_summary.append(f"- {t['name']}: {status} → {data_preview}")
+    
+    summary_prompt = f"""Based on the investigation of {service}, here is what the tools found:
+
+{chr(10).join(evidence_summary[:10])}
+
+Now provide your final Root Cause Analysis as JSON (no markdown):
+{{"rca": {{"what_failed": "...", "how_it_failed": "...", "root_cause": ["..."], "evidence": [{{"type": "...", "detail": "..."}}], "impact": "...", "immediate_fix": ["..."], "long_term_fix": ["..."]}}}}"""
+
+    messages_final = [
+        {"role": "system", "content": "You are an SRE assistant. Analyze the evidence and return a JSON RCA. No markdown."},
+        {"role": "user", "content": summary_prompt}
+    ]
+    
+    try:
+        resp = client.create_chat_completion(model=model, messages=messages_final, tools=None)
+        content = (resp.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            final_json = json.loads(content)
+        except json.JSONDecodeError:
+            final_json = _build_rca_from_evidence(service, executed_tools, content)
+    except Exception as e:
+        print(f"[Agent] Final summary call failed: {e}")
+        final_json = _build_rca_from_evidence(service, executed_tools, "")
+    
     final_json["tools"] = executed_tools
+    logger.info(f"Completed Investigation (forced). RCA: {json.dumps(final_json)[:2000]}")
     return final_json
+
+
+def _build_rca_from_evidence(service, executed_tools, raw_text):
+    """Build an RCA from the tool results when LLM can't produce JSON."""
+    evidence = []
+    errors_found = []
+    empty_results = []
+    
+    for t in executed_tools:
+        data = t["result"].get("mcp_data", [])
+        status = t["result"].get("status", "unknown")
+        
+        if status == "error":
+            errors_found.append(f"{t['name']}: {t['result'].get('error', 'unknown error')[:100]}")
+        elif data and data[0] and str(data[0]) != "[]":
+            evidence.append({"type": "tool_result", "source": t["name"], "detail": str(data[0])[:200]})
+        else:
+            empty_results.append(t["name"])
+    
+    what_failed = service
+    if not evidence and not errors_found:
+        how_failed = f"No data found for '{service}' in any datasource. This namespace/service may not exist in the cluster."
+        root_cause = [f"The namespace '{service}' does not exist in Grafana's connected Kubernetes cluster"]
+        immediate_fix = [
+            f"Verify the service name — check existing namespaces in the K8s Pods dashboard",
+            "Try querying with an existing namespace (e.g. 'default', 'monitoring', 'kube-system')"
+        ]
+    else:
+        how_failed = "; ".join(errors_found[:3]) if errors_found else "See evidence below"
+        root_cause = errors_found[:3] if errors_found else ["Investigation completed — see evidence"]
+        immediate_fix = ["Review the evidence gathered by the MCP tools above"]
+    
+    return {
+        "rca": {
+            "what_failed": what_failed,
+            "how_it_failed": how_failed,
+            "root_cause": root_cause,
+            "evidence": evidence[:5],
+            "impact": f"Investigation covered {len(executed_tools)} tool calls across Prometheus and Loki",
+            "immediate_fix": immediate_fix,
+            "long_term_fix": ["Set up alerting for this service in Grafana", "Add dashboards for service-level monitoring"]
+        },
+        "raw_response": raw_text[:1000] if raw_text else ""
+    }
+

@@ -26,22 +26,17 @@ def query_loki_logs(service: str, time_range: str, level: str = "ERROR"):
     }
 
 def query_prometheus_metrics(metric_name: str, service: str, time_range: str = "last_1h"):
-    # If a real Prometheus URL is configured, attempt to query it once
+    # Query real Prometheus via Grafana datasource proxy
     prom_url = CONFIG.get("PROMETHEUS_URL")
     if prom_url:
         try:
-            r = requests.get(f"{prom_url}/api/v1/query", params={"query": metric_name}, timeout=5)
+            r = requests.get(f"{prom_url}/query", params={"query": metric_name}, timeout=5)
             r.raise_for_status()
             return {"status": "success", "metric": metric_name, "service": service, "data": r.json()}
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": str(e), "detail": f"Failed to query Prometheus at {prom_url}"}
 
-    data = get_data_for(service)
-    for key, series in data["metrics"].items():
-        if key == metric_name or metric_name in key:
-            return {"status": "success", "metric": key, "service": service, "data_points": series}
-
-    return {"status": "success", "all_metrics": data["metrics"]}
+    return {"status": "error", "message": "PROMETHEUS_URL not configured"}
 
 def list_firing_alerts(service: str = "", state: str = "all"):
     data = get_data_for(service or "payment-service")
