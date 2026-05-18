@@ -1,6 +1,6 @@
 """Slack Bot for Grafana SRE Agent.
 
-Listens to @mentions in a Slack channel and routes them through the
+Listens to messages in a Slack channel and routes them through the
 MCP → LLM pipeline, posting the RCA back as a formatted Slack message.
 
 Usage:
@@ -14,19 +14,8 @@ import os
 import sys
 import json
 import threading
-import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-from dotenv import load_dotenv
-load_dotenv()
-
-# Set up logging — INFO level to reduce noise
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s'
-)
-logger = logging.getLogger("sre_slack_bot")
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -37,13 +26,9 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 
 if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
-    logger.error("Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env")
+    print("ERROR: Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env")
     sys.exit(1)
 
-logger.info(f"Bot token: {SLACK_BOT_TOKEN[:15]}...")
-logger.info(f"App token: {SLACK_APP_TOKEN[:15]}...")
-
-# Create app with single-thread concurrency to avoid BrokenPipe
 app = App(token=SLACK_BOT_TOKEN)
 
 
@@ -58,13 +43,20 @@ def _format_rca_blocks(result, query):
         {"type": "divider"},
     ]
 
+    # What Failed
     if rca.get("what_failed"):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔴 *What Failed*\n{rca['what_failed']}"}})
+
+    # How It Failed
     if rca.get("how_it_failed"):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ *How It Failed*\n{rca['how_it_failed']}"}})
+
+    # Root Cause
     if rca.get("root_cause"):
         causes = "\n".join(f"• {c}" for c in rca["root_cause"])
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔍 *Root Cause*\n{causes}"}})
+
+    # Evidence
     if rca.get("evidence"):
         evidence_lines = []
         for e in rca["evidence"][:5]:
@@ -72,20 +64,24 @@ def _format_rca_blocks(result, query):
                 evidence_lines.append(f"• `[{e.get('type','')}]` {e.get('source','')} — {e.get('detail','')}")
             else:
                 evidence_lines.append(f"• {e}")
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "📋 *Evidence*\n" + "\n".join(evidence_lines)}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"📋 *Evidence*\n" + "\n".join(evidence_lines)}})
+
+    # Impact
     if rca.get("impact"):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚡ *Impact*\n{rca['impact']}"}})
 
+    # How To Fix
     fixes = []
     for f in rca.get("immediate_fix", []):
         fixes.append(f"• *Now:* {f}")
     for f in rca.get("long_term_fix", []):
         fixes.append(f"• *Long-term:* {f}")
     if fixes:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "✅ *How To Fix*\n" + "\n".join(fixes)}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"✅ *How To Fix*\n" + "\n".join(fixes)}})
 
     blocks.append({"type": "divider"})
 
+    # Tool calls summary
     if tools:
         tool_summary = ", ".join(f"`{t['name']}`" for t in tools[:6])
         blocks.append({"type": "context", "elements": [
@@ -95,58 +91,59 @@ def _format_rca_blocks(result, query):
     return blocks
 
 
-def _run_investigation(client, channel, query, service, thread_ts):
-    """Run the investigation in a background thread using client.chat_postMessage."""
+def _run_investigation(say, query, service, thread_ts):
+    """Run the investigation in a background thread."""
     try:
-        logger.info(f"Starting investigation: service={service}")
         result = run_llm_orchestrated_query(user_query=query, service=service)
         blocks = _format_rca_blocks(result, query)
-        client.chat_postMessage(channel=channel, blocks=blocks, thread_ts=thread_ts)
-        logger.info("RCA posted to Slack successfully!")
+        say(blocks=blocks, thread_ts=thread_ts)
     except Exception as e:
-        logger.error(f"Investigation failed: {e}")
-        client.chat_postMessage(
-            channel=channel,
-            text=f"❌ Investigation failed: {str(e)[:500]}",
-            thread_ts=thread_ts
-        )
+        say(text=f"❌ Investigation failed: {str(e)[:500]}", thread_ts=thread_ts)
 
 
 @app.event("app_mention")
-def handle_mention(event, say, client):
-    """Handle @mentions in any channel."""
-    logger.info(f"=== APP_MENTION EVENT RECEIVED ===")
-    logger.info(f"Channel: {event.get('channel')}, User: {event.get('user')}")
-    logger.info(f"Text: {event.get('text', '')[:200]}")
-
+def handle_mention(event, say):
+    """Handle @SRE-Agent mentions in any channel."""
     text = event.get("text", "")
-    channel = event.get("channel")
     thread_ts = event.get("ts")
 
-    # Remove the bot mention from the text (<@U12345> query text)
+    # Remove the bot mention from the text
+    # Text looks like: "<@U12345> check monitoring namespace health"
     parts = text.split(">", 1)
     query = parts[1].strip() if len(parts) > 1 else text
 
     if not query:
-        say(text="👋 I'm the SRE Agent! Ask me about your K8s cluster.\n"
-                 "Example: `@Grafana check monitoring namespace for errors`",
+        say(text="👋 I'm the SRE Agent! Ask me about your K8s cluster health, pod restarts, logs, etc.\n"
+                 "Example: `@SRE-Agent check monitoring namespace for errors`",
             thread_ts=thread_ts)
         return
 
-    # Extract namespace from query
+    # Extract service/namespace from the query (default: monitoring)
     service = "monitoring"
-    for ns in ["monitoring", "platform", "kube-system", "ingress-nginx",
-               "velero", "awx", "cert-manager", "default", "control-plane"]:
+    for ns in ["monitoring", "platform", "kube-system", "ingress-nginx", "velero", "awx", "cert-manager", "default"]:
         if ns in query.lower():
             service = ns
             break
 
-    logger.info(f"Namespace: {service}, Query: {query[:100]}")
-    say(text=f"🔍 Investigating *{service}* namespace...\n_This may take 1-3 minutes._",
-        thread_ts=thread_ts)
+    say(text=f"🔍 Investigating *{service}* namespace...\n_This may take 1-3 minutes._", thread_ts=thread_ts)
 
-    # Run in background thread to avoid Slack 3-second timeout
-    t = threading.Thread(
+    # Run in background thread to avoid Slack timeout
+    t = threading.Thread(target=_run_investigation, args=(say, query, service, thread_ts))
+    t.start()
+
+
+@app.event("message")
+def handle_message(event, say):
+    """Ignore regular messages (only respond to @mentions)."""
+    pass
+
+
+if __name__ == "__main__":
+    print("⚡ SRE Grafana Agent — Slack Bot starting...")
+    print(f"   Grafana: {CONFIG.get('GRAFANA_URL', 'not set')}")
+    print(f"   Model:   {CONFIG.get('OPENROUTER_MODEL', 'not set')}")
+    handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+    handler.start()
         target=_run_investigation,
         args=(client, channel, query, service, thread_ts),
         daemon=True
