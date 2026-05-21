@@ -46,13 +46,20 @@ class OpenRouterClient(LLMClient):
             # Ollama requires tool_call_id on tool messages
             if msg.get("role") == "tool" and not msg.get("tool_call_id"):
                 msg["tool_call_id"] = "call_0"
-                
+            
             clean_messages.append(msg)
+        
+        # Truncate very long messages to avoid context overflow
+        MAX_MSG_CHARS = 4000
+        for msg in clean_messages:
+            if msg.get("content") and len(msg["content"]) > MAX_MSG_CHARS:
+                msg["content"] = msg["content"][:MAX_MSG_CHARS] + "\n... [truncated]"
         
         payload = {"model": model, "messages": clean_messages}
         
-        # IMPORTANT: Don't send tools to Qwen - it doesn't support OpenAI tools format
-        # Just let the system prompt and messages guide the analysis
+        # Include tools if provided — Qwen3 supports OpenAI-compatible tool calling
+        if tools:
+            payload["tools"] = tools
         
         headers = {
             "Content-Type": "application/json",
@@ -62,8 +69,6 @@ class OpenRouterClient(LLMClient):
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         print(f"[LLM] Calling {url} with model={model}, {len(clean_messages)} messages, {len(tools or [])} tools")
-        print(f"[LLM] Full payload keys: {payload.keys()}")
-        print(f"[LLM] Payload: {json.dumps(payload, indent=2, default=str)[:500]}...")
         
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=300)
@@ -88,12 +93,29 @@ class OpenRouterClient(LLMClient):
             return {"choices": [{"message": {"content": '{"rca": {"what_failed": "LLM request timed out", "root_cause": ["Model inference took too long"]}}'}}]}
         except requests.exceptions.RequestException as e:
             error_body = None
-            if hasattr(e.response, 'text'):
+            if hasattr(e.response, 'text') and e.response is not None:
                 error_body = e.response.text[:500]
-            print(f"[LLM] ERROR: Request failed: {e}")
+            status_code = getattr(e.response, 'status_code', None) if e.response is not None else None
+            print(f"[LLM] ERROR: Request failed (HTTP {status_code}): {e}")
             if error_body:
                 print(f"[LLM] Response body: {error_body}")
-            return {"choices": [{"message": {"content": f'{{"rca": {{"what_failed": "LLM request failed", "root_cause": ["{str(e)}"]}}}}'}}]}
+            
+            # Retry without tools on 400 Bad Request (model may not support tool format)
+            if status_code == 400 and tools:
+                print("[LLM] Retrying WITHOUT tools (400 may be caused by tool format)...")
+                try:
+                    payload_no_tools = {"model": model, "messages": clean_messages}
+                    r2 = requests.post(url, json=payload_no_tools, headers=headers, timeout=300)
+                    r2.raise_for_status()
+                    response2 = r2.json()
+                    if "choices" not in response2 and "message" in response2:
+                        response2 = {"choices": [{"message": response2["message"]}]}
+                    print("[LLM] Retry without tools succeeded")
+                    return response2
+                except Exception as e2:
+                    print(f"[LLM] Retry without tools also failed: {e2}")
+            
+            return {"choices": [{"message": {"content": f'{{"rca": {{"what_failed": "LLM request failed", "root_cause": ["{str(e)}"]}}}}' }}]}
 
     def _simulation_response(self, messages):
         """Simulation-mode behavior: return structured tool call plan first,
